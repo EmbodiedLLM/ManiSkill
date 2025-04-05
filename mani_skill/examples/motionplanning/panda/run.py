@@ -9,7 +9,7 @@ from tqdm import tqdm
 import os.path as osp
 from mani_skill.utils.wrappers.record import RecordEpisode
 from mani_skill.trajectory.merge_trajectory import merge_trajectories
-from mani_skill.examples.motionplanning.panda.solutions import solvePushCube, solvePickCube, solveStackCube, solvePegInsertionSide, solvePlugCharger, solvePullCubeTool, solveLiftPegUpright, solvePullCube, solveDrawTriangle, solveDrawSVG
+from mani_skill.examples.motionplanning.panda.solutions import solvePushCube, solvePickCube, solveStackCube, solvePegInsertionSide, solvePlugCharger, solvePullCubeTool, solveLiftPegUpright, solvePullCube, solveDrawTriangle, solveDrawSVG,solveThreeCup
 MP_SOLUTIONS = {
     "DrawTriangle-v1": solveDrawTriangle,
     "PickCube-v1": solvePickCube,
@@ -20,7 +20,8 @@ MP_SOLUTIONS = {
     "PullCubeTool-v1": solvePullCubeTool,
     "LiftPegUpright-v1": solveLiftPegUpright,
     "PullCube-v1": solvePullCube,
-    "DrawSVG-v1" : solveDrawSVG
+    "DrawSVG-v1" : solveDrawSVG,
+    "ThreeCup-v1" : solveThreeCup
 }
 def parse_args(args=None):
     parser = argparse.ArgumentParser()
@@ -91,9 +92,14 @@ def _main(args, proc_id: int = 0, start_seed: int = 0) -> str:
             success = False
             failed_motion_plans += 1
         else:
-            success = res[-1]["success"].item()
-            elapsed_steps = res[-1]["elapsed_steps"].item()
-            solution_episode_lengths.append(elapsed_steps)
+            if isinstance(res, list):
+                success = res[-1]["success"].item()
+                elapsed_steps = res[-1]["elapsed_steps"].item()
+                solution_episode_lengths.append(elapsed_steps)
+            else:
+                success = res["status"] == 'Success'
+                elapsed_steps = env.get_wrapper_attr('elapsed_steps')
+                solution_episode_lengths.append(elapsed_steps)
         successes.append(success)
         if args.only_count_success and not success:
             seed += 1
