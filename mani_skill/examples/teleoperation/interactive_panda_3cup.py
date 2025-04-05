@@ -160,6 +160,128 @@ def solve(env: BaseEnv, debug=False, vis=False):
     def select_panda_hand():
         viewer.select_entity(sapien_utils.get_obj_by_name(env.agent.robot.links, "panda_hand")._objs[0].entity)
     
+    def pick_cup_with_ball():
+        print("Finding and picking up the cup containing the ball...")
+        
+        # 获取三个杯子和球的引用
+        papercup1 = env.unwrapped.papercup
+        papercup2 = env.unwrapped.papercup2
+        papercup3 = env.unwrapped.papercup3
+        ball = env.unwrapped.ball
+        
+        # 确定哪个杯子中有球
+        ball_pos = ball.pose.p.cpu().numpy().astype(np.float32).squeeze()
+        cup_positions = {
+            1: papercup1.pose.p.cpu().numpy().astype(np.float32).squeeze(),
+            2: papercup2.pose.p.cpu().numpy().astype(np.float32).squeeze(),
+            3: papercup3.pose.p.cpu().numpy().astype(np.float32).squeeze()
+        }
+        
+        # 计算球到每个杯子的距离
+        distances = {}
+        for idx, pos in cup_positions.items():
+            # 计算水平距离(仅xy平面)
+            dist = np.sqrt((ball_pos[0] - pos[0])**2 + (ball_pos[1] - pos[1])**2)
+            distances[idx] = dist
+        
+        # 找到离球最近的杯子
+        ball_in_cup_idx = min(distances, key=distances.get)
+        print(f"Ball is in cup {ball_in_cup_idx}")
+        
+        # 根据索引获取目标杯子
+        cups = {
+            1: papercup1,
+            2: papercup2,
+            3: papercup3
+        }
+        target_cup = cups[ball_in_cup_idx]
+        
+        # 为抓取准备参数
+        FINGER_LENGTH = 0.025
+        
+        # 获取目标杯子的OBB用于计算抓取
+        from mani_skill.examples.motionplanning.panda.utils import compute_grasp_info_by_obb, get_actor_obb
+        obb = get_actor_obb(target_cup)
+        
+        # 计算抓取姿态
+        approaching = np.array([0, 0, -1])  # 从上方接近
+        target_closing = env.unwrapped.agent.tcp.pose.to_transformation_matrix()[0, :3, 1].cpu().numpy()
+        grasp_info = compute_grasp_info_by_obb(
+            obb,
+            approaching=approaching,
+            target_closing=target_closing,
+            depth=FINGER_LENGTH,
+        )
+        closing, center = grasp_info["closing"], grasp_info["center"]
+        grasp_pose = env.unwrapped.agent.build_grasp_pose(approaching, closing, center)
+        
+        # 搜索有效的抓取姿态
+        from transforms3d.euler import euler2quat
+        angles = np.arange(0, np.pi * 2 / 3, np.pi / 2)
+        angles = np.repeat(angles, 2)
+        angles[1::2] *= -1
+        for angle in angles:
+            delta_pose = sapien.Pose(q=euler2quat(0, 0, angle))
+            grasp_pose2 = grasp_pose * delta_pose
+            res = planner.move_to_pose_with_screw(grasp_pose2, dry_run=True)
+            if res == -1:
+                continue
+            grasp_pose = grasp_pose2
+            break
+        else:
+            print("Fail to find a valid grasp pose")
+            return
+        
+        # 首先移动到杯子上方以避免碰撞
+        print("Moving above the cup...")
+        pre_grasp_pose = grasp_pose * sapien.Pose([0, 0, -0.1])
+        result = planner.move_to_pose_with_screw(pre_grasp_pose, dry_run=True)
+        if result != -1:
+            _, reward, _, _, info = planner.follow_path(result)
+            print(f"Reward: {reward}, Info: {info}")
+        else:
+            print("Failed to plan path to position above cup")
+            return
+        
+        # 接近杯子
+        print("Approaching the cup...")
+        reach_pose = grasp_pose * sapien.Pose([0, 0, -0.05])
+        result = planner.move_to_pose_with_screw(reach_pose, dry_run=True)
+        if result != -1:
+            _, reward, _, _, info = planner.follow_path(result)
+            print(f"Reward: {reward}, Info: {info}")
+        else:
+            print("Failed to plan path to approach cup")
+            return
+        
+        # 移动到抓取位置
+        print("Moving to grasp position...")
+        result = planner.move_to_pose_with_screw(grasp_pose, dry_run=True)
+        if result != -1:
+            _, reward, _, _, info = planner.follow_path(result)
+            print(f"Reward: {reward}, Info: {info}")
+        else:
+            print("Failed to plan path to grasp position")
+            return
+        
+        # 抓取
+        print("Closing gripper...")
+        _, reward, _, _, info = planner.close_gripper()
+        print(f"Reward: {reward}, Info: {info}")
+        
+        # 提起
+        print("Lifting cup...")
+        lift_pose = sapien.Pose([0, 0, 0.2]) * grasp_pose
+        result = planner.move_to_pose_with_screw(lift_pose, dry_run=True)
+        if result != -1:
+            _, reward, _, _, info = planner.follow_path(result)
+            print(f"Reward: {reward}, Info: {info}")
+        else:
+            print("Failed to plan lifting path")
+        
+        print("Pick up operation complete")
+
+
     def auto_play():
         global scene_camera_frames  # 使用全局变量存储帧
         scene_camera_frames = []  # 清空之前可能存在的帧
@@ -218,142 +340,8 @@ def solve(env: BaseEnv, debug=False, vis=False):
             
             print(f"Shuffle {i+1}/3: Swapping cup {cup_idx1} and cup {cup_idx2}")
             
-            # 修改perform_shuffle_animation以捕获每个动画帧
-            def shuffle_with_capture(cup_idx1, cup_idx2):
-                print(f"Playing shuffle animation between cup {cup_idx1} and cup {cup_idx2}...")
-                # 获取杯子和球的引用
-                papercup1 = env.unwrapped.papercup
-                papercup2 = env.unwrapped.papercup2
-                papercup3 = env.unwrapped.papercup3
-                ball = env.unwrapped.ball  # 获取球对象
-
-                papercup1_original_pose = sapien.Pose(
-                    p=papercup1.pose.p.cpu().numpy().astype(np.float32).squeeze(),
-                    q=papercup1.pose.q.cpu().numpy().astype(np.float32).squeeze()
-                )
-                papercup2_original_pose = sapien.Pose(
-                    p=papercup2.pose.p.cpu().numpy().astype(np.float32).squeeze(),
-                    q=papercup2.pose.q.cpu().numpy().astype(np.float32).squeeze()
-                )
-                papercup3_original_pose = sapien.Pose(
-                    p=papercup3.pose.p.cpu().numpy().astype(np.float32).squeeze(),
-                    q=papercup3.pose.q.cpu().numpy().astype(np.float32).squeeze()
-                )
-                
-                # 根据输入索引获取指定的杯子
-                cups = {
-                    1: (papercup1, papercup1_original_pose),
-                    2: (papercup2, papercup2_original_pose),
-                    3: (papercup3, papercup3_original_pose)
-                }
-                # 验证杯子索引
-                assert cup_idx1 in cups, f"Invalid cup index {cup_idx1}. Please use values 1, 2, or 3."
-                assert cup_idx2 in cups, f"Invalid cup index {cup_idx2}. Please use values 1, 2, or 3."
-                assert cup_idx1 != cup_idx2, "Please select two different cups."
-                
-                # 根据输入定义要交换的杯子
-                cup1, cup1_pose = cups[cup_idx1]
-                cup2, cup2_pose = cups[cup_idx2]
-                
-                # 确定哪个杯子包含球
-                ball_pos = ball.pose.p.cpu().numpy().astype(np.float32).squeeze()
-                cup_positions = {
-                    1: papercup1.pose.p.cpu().numpy().astype(np.float32).squeeze(),
-                    2: papercup2.pose.p.cpu().numpy().astype(np.float32).squeeze(),
-                    3: papercup3.pose.p.cpu().numpy().astype(np.float32).squeeze()
-                }
-                
-                # 计算球到每个杯子的距离
-                distances = {}
-                for idx, pos in cup_positions.items():
-                    # 计算水平距离(仅xy平面)
-                    dist = np.sqrt((ball_pos[0] - pos[0])**2 + (ball_pos[1] - pos[1])**2)
-                    distances[idx] = dist
-                
-                # 找到离球最近的杯子
-                ball_in_cup_idx = min(distances, key=distances.get)
-                ball_offset = ball_pos - cup_positions[ball_in_cup_idx]  # 球在杯中的相对位置
-                
-                print(f"Ball is in cup {ball_in_cup_idx}")
-                
-                # 总动画帧数
-                total_frames = 60
-                
-                # 获取起始和结束位置
-                start_pos1 = cup1_pose.p
-                start_pos2 = cup2_pose.p
-                
-                # 保持恒定的z高度(停留在桌面上)
-                z_height1 = start_pos1[2]
-                z_height2 = start_pos2[2]
-                
-                # 计算杯子之间的中点(作为半圆的中心)
-                midpoint_x = (start_pos1[0] + start_pos2[0]) / 2
-                midpoint_y = (start_pos1[1] + start_pos2[1]) / 2
-                
-                # 根据杯子之间的距离计算半径
-                radius = np.sqrt((start_pos1[0] - start_pos2[0])**2 + (start_pos1[1] - start_pos2[1])**2) / 2
-                
-                # 计算每个杯子的初始角度
-                angle1 = np.arctan2(start_pos1[1] - midpoint_y, start_pos1[0] - midpoint_x)
-                angle2 = np.arctan2(start_pos2[1] - midpoint_y, start_pos2[0] - midpoint_x)
-                
-                # 计算半圆轨迹点
-                for i in range(total_frames + 1):
-                    t = i / total_frames  # 从0到1的归一化时间
-                    
-                    # 使用半圆插值计算新角度(180度 = π弧度)
-                    new_angle1 = angle1 + t * np.pi
-                    new_angle2 = angle2 + t * np.pi
-                    
-                    # 使用圆周运动计算杯子的新位置
-                    cup1_x = midpoint_x + radius * np.cos(new_angle1)
-                    cup1_y = midpoint_y + radius * np.sin(new_angle1)
-                    
-                    cup2_x = midpoint_x + radius * np.cos(new_angle2)
-                    cup2_y = midpoint_y + radius * np.sin(new_angle2)
-                    
-                    # 设置杯子的新位置，保持原始z高度
-                    cup1.set_pose(sapien.Pose(
-                        p=np.array([cup1_x, cup1_y, z_height1], dtype=np.float32),
-                        q=cup1_pose.q
-                    ))
-                    
-                    cup2.set_pose(sapien.Pose(
-                        p=np.array([cup2_x, cup2_y, z_height2], dtype=np.float32),
-                        q=cup2_pose.q
-                    ))
-                    
-                    # 更新球的位置以跟随它所在的杯子
-                    if ball_in_cup_idx == cup_idx1:
-                        # 球在cup1中，更新球的位置以跟随cup1
-                        new_ball_pos = np.array([cup1_x, cup1_y, z_height1], dtype=np.float32) + ball_offset
-                        ball.set_pose(sapien.Pose(
-                            p=new_ball_pos,
-                            q=ball.pose.q.cpu().numpy().astype(np.float32).squeeze()
-                        ))
-                    elif ball_in_cup_idx == cup_idx2:
-                        # 球在cup2中，更新球的位置以跟随cup2
-                        new_ball_pos = np.array([cup2_x, cup2_y, z_height2], dtype=np.float32) + ball_offset
-                        ball.set_pose(sapien.Pose(
-                            p=new_ball_pos,
-                            q=ball.pose.q.cpu().numpy().astype(np.float32).squeeze()
-                        ))
-                    
-                    # 更新模拟状态以更新视觉状态
-                    qpos = planner.robot.get_qpos()
-                    planner.robot.set_qpos(qpos)
-                    env.scene.step()
-                    env.render_human()
-                    
-                    capture_frame()
-                    
-                    time.sleep(0.01)  # 平滑动画的短暂延迟
-                
-                print("Shuffle animation completed")
-                
-            # 执行带捕获的交换动画
-            shuffle_with_capture(cup_idx1, cup_idx2)
+            # 使用全局的shuffle_with_capture函数
+            shuffle_with_capture(cup_idx1, cup_idx2, capture_frame=capture_frame)
             
             # 在交换之间暂停
             time.sleep(0.25)
@@ -371,6 +359,159 @@ def solve(env: BaseEnv, debug=False, vis=False):
         video_path = f"videos/cup_shuffle_{time.strftime('%Y%m%d_%H%M%S')}.mp4"
         vwrite(video_path, frames_array)
         print(f"Auto play complete - video saved to {video_path}")
+    
+    def shuffle_with_capture(cup_idx1=None, cup_idx2=None, capture_frame=None):
+        """
+        执行杯子交换动画
+        
+        Args:
+            cup_idx1: 第一个杯子的索引 (1, 2, 或 3)，如果为None则随机选择
+            cup_idx2: 第二个杯子的索引 (1, 2, 或 3)，如果为None则随机选择
+            capture_frame: 可选的帧捕获函数，用于视频录制，如果为None则不录制
+        """
+        # 如果没有指定杯子索引，则随机选择
+        if cup_idx1 is None or cup_idx2 is None:
+            available_cups = [1, 2, 3]
+            if cup_idx1 is None:
+                cup_idx1 = random.choice(available_cups)
+                available_cups.remove(cup_idx1)
+            if cup_idx2 is None:
+                cup_idx2 = random.choice(available_cups)
+        
+        print(f"Playing shuffle animation between cup {cup_idx1} and cup {cup_idx2}...")
+        # 获取杯子和球的引用
+        papercup1 = env.unwrapped.papercup
+        papercup2 = env.unwrapped.papercup2
+        papercup3 = env.unwrapped.papercup3
+        ball = env.unwrapped.ball  # 获取球对象
+
+        papercup1_original_pose = sapien.Pose(
+            p=papercup1.pose.p.cpu().numpy().astype(np.float32).squeeze(),
+            q=papercup1.pose.q.cpu().numpy().astype(np.float32).squeeze()
+        )
+        papercup2_original_pose = sapien.Pose(
+            p=papercup2.pose.p.cpu().numpy().astype(np.float32).squeeze(),
+            q=papercup2.pose.q.cpu().numpy().astype(np.float32).squeeze()
+        )
+        papercup3_original_pose = sapien.Pose(
+            p=papercup3.pose.p.cpu().numpy().astype(np.float32).squeeze(),
+            q=papercup3.pose.q.cpu().numpy().astype(np.float32).squeeze()
+        )
+        
+        # 根据输入索引获取指定的杯子
+        cups = {
+            1: (papercup1, papercup1_original_pose),
+            2: (papercup2, papercup2_original_pose),
+            3: (papercup3, papercup3_original_pose)
+        }
+        # 验证杯子索引
+        assert cup_idx1 in cups, f"Invalid cup index {cup_idx1}. Please use values 1, 2, or 3."
+        assert cup_idx2 in cups, f"Invalid cup index {cup_idx2}. Please use values 1, 2, or 3."
+        assert cup_idx1 != cup_idx2, "Please select two different cups."
+        
+        # 根据输入定义要交换的杯子
+        cup1, cup1_pose = cups[cup_idx1]
+        cup2, cup2_pose = cups[cup_idx2]
+        
+        # 确定哪个杯子包含球
+        ball_pos = ball.pose.p.cpu().numpy().astype(np.float32).squeeze()
+        cup_positions = {
+            1: papercup1.pose.p.cpu().numpy().astype(np.float32).squeeze(),
+            2: papercup2.pose.p.cpu().numpy().astype(np.float32).squeeze(),
+            3: papercup3.pose.p.cpu().numpy().astype(np.float32).squeeze()
+        }
+        
+        # 计算球到每个杯子的距离
+        distances = {}
+        for idx, pos in cup_positions.items():
+            # 计算水平距离(仅xy平面)
+            dist = np.sqrt((ball_pos[0] - pos[0])**2 + (ball_pos[1] - pos[1])**2)
+            distances[idx] = dist
+        
+        # 找到离球最近的杯子
+        ball_in_cup_idx = min(distances, key=distances.get)
+        ball_offset = ball_pos - cup_positions[ball_in_cup_idx]  # 球在杯中的相对位置
+        
+        print(f"Ball is in cup {ball_in_cup_idx}")
+        
+        # 总动画帧数
+        total_frames = 60
+        
+        # 获取起始和结束位置
+        start_pos1 = cup1_pose.p
+        start_pos2 = cup2_pose.p
+        
+        # 保持恒定的z高度(停留在桌面上)
+        z_height1 = start_pos1[2]
+        z_height2 = start_pos2[2]
+        
+        # 计算杯子之间的中点(作为半圆的中心)
+        midpoint_x = (start_pos1[0] + start_pos2[0]) / 2
+        midpoint_y = (start_pos1[1] + start_pos2[1]) / 2
+        
+        # 根据杯子之间的距离计算半径
+        radius = np.sqrt((start_pos1[0] - start_pos2[0])**2 + (start_pos1[1] - start_pos2[1])**2) / 2
+        
+        # 计算每个杯子的初始角度
+        angle1 = np.arctan2(start_pos1[1] - midpoint_y, start_pos1[0] - midpoint_x)
+        angle2 = np.arctan2(start_pos2[1] - midpoint_y, start_pos2[0] - midpoint_x)
+        
+        # 计算半圆轨迹点
+        for i in range(total_frames + 1):
+            t = i / total_frames  # 从0到1的归一化时间
+            
+            # 使用半圆插值计算新角度(180度 = π弧度)
+            new_angle1 = angle1 + t * np.pi
+            new_angle2 = angle2 + t * np.pi
+            
+            # 使用圆周运动计算杯子的新位置
+            cup1_x = midpoint_x + radius * np.cos(new_angle1)
+            cup1_y = midpoint_y + radius * np.sin(new_angle1)
+            
+            cup2_x = midpoint_x + radius * np.cos(new_angle2)
+            cup2_y = midpoint_y + radius * np.sin(new_angle2)
+            
+            # 设置杯子的新位置，保持原始z高度
+            cup1.set_pose(sapien.Pose(
+                p=np.array([cup1_x, cup1_y, z_height1], dtype=np.float32),
+                q=cup1_pose.q
+            ))
+            
+            cup2.set_pose(sapien.Pose(
+                p=np.array([cup2_x, cup2_y, z_height2], dtype=np.float32),
+                q=cup2_pose.q
+            ))
+            
+            # 更新球的位置以跟随它所在的杯子
+            if ball_in_cup_idx == cup_idx1:
+                # 球在cup1中，更新球的位置以跟随cup1
+                new_ball_pos = np.array([cup1_x, cup1_y, z_height1], dtype=np.float32) + ball_offset
+                ball.set_pose(sapien.Pose(
+                    p=new_ball_pos,
+                    q=ball.pose.q.cpu().numpy().astype(np.float32).squeeze()
+                ))
+            elif ball_in_cup_idx == cup_idx2:
+                # 球在cup2中，更新球的位置以跟随cup2
+                new_ball_pos = np.array([cup2_x, cup2_y, z_height2], dtype=np.float32) + ball_offset
+                ball.set_pose(sapien.Pose(
+                    p=new_ball_pos,
+                    q=ball.pose.q.cpu().numpy().astype(np.float32).squeeze()
+                ))
+            
+            # 更新模拟状态以更新视觉状态
+            qpos = planner.robot.get_qpos()
+            planner.robot.set_qpos(qpos)
+            env.scene.step()
+            env.render_human()
+            
+            # 如果提供了捕获函数，则捕获当前帧
+            if capture_frame is not None:
+                capture_frame()
+            
+            time.sleep(0.01)  # 平滑动画的短暂延迟
+        
+        print("Shuffle animation completed")
+        return ball_in_cup_idx  # 返回球所在杯子的索引
     
     select_panda_hand()
     for plugin in viewer.plugins:
@@ -397,6 +538,7 @@ def solve(env: BaseEnv, debug=False, vis=False):
             c: stop this episode and record the trajectory and move on to a new episode
             q: quit the script and stop collecting data. Save trajectories and optionally videos.
             z: start one demo
+            b: pick up the cup containing the ball using motion planning
             """)
             pass
         # elif viewer.window.key_press("k"):
@@ -423,7 +565,9 @@ def solve(env: BaseEnv, debug=False, vis=False):
         elif viewer.window.key_press("z"):
             auto_play()
         elif viewer.window.key_press("f"):
-            auto_play()
+            shuffle_with_capture()  # 现在可以直接调用，不需要传参数，会随机选择杯子
+        elif viewer.window.key_press("b"):
+            pick_cup_with_ball()
         elif viewer.window.key_press("g") and robot_has_gripper:
             if gripper_open:
                 gripper_open = False
@@ -469,8 +613,6 @@ def solve(env: BaseEnv, debug=False, vis=False):
                 if result == -1: print("Plan failed")
                 else: print("Generated motion plan was too long. Try a closer sub-goal")
             execute_current_pose = False
-
-
 
     return args
 if __name__ == "__main__":
