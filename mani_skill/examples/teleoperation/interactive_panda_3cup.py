@@ -22,6 +22,8 @@ import tyro
 from dataclasses import dataclass
 from skvideo.io import vwrite
 import os
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 
 
 @dataclass
@@ -162,13 +164,13 @@ def solve(env: BaseEnv, debug=False, vis=False):
     
     def pick_cup_with_ball():
         print("Finding and picking up the cup containing the ball...")
+
         
         # 获取三个杯子和球的引用
         papercup1 = env.unwrapped.papercup
         papercup2 = env.unwrapped.papercup2
         papercup3 = env.unwrapped.papercup3
         ball = env.unwrapped.ball
-        
         # 确定哪个杯子中有球
         ball_pos = ball.pose.p.cpu().numpy().astype(np.float32).squeeze()
         cup_positions = {
@@ -282,6 +284,31 @@ def solve(env: BaseEnv, debug=False, vis=False):
         print("Pick up operation complete")
 
 
+    def get_cup_positions():
+        """Determine which cup is left, middle, and right based on x coordinates"""
+        papercup1 = env.unwrapped.papercup
+        papercup2 = env.unwrapped.papercup2
+        papercup3 = env.unwrapped.papercup3
+        
+        # Get x coordinates of cups
+        cup_positions = {
+            1: papercup1.pose.p.cpu().numpy().astype(np.float32).squeeze()[0],
+            2: papercup2.pose.p.cpu().numpy().astype(np.float32).squeeze()[0],
+            3: papercup3.pose.p.cpu().numpy().astype(np.float32).squeeze()[0]
+        }
+        
+        # Sort cups by x coordinate
+        sorted_cups = sorted(cup_positions.items(), key=lambda x: x[1])
+        
+        # Map cup indices to positions
+        position_map = {
+            sorted_cups[0][0]: "right",
+            sorted_cups[1][0]: "middle",
+            sorted_cups[2][0]: "left"
+        }
+        
+        return position_map
+
     def auto_play():
         global scene_camera_frames  # 使用全局变量存储帧
         scene_camera_frames = []  # 清空之前可能存在的帧
@@ -319,6 +346,20 @@ def solve(env: BaseEnv, debug=False, vis=False):
         for _ in range(30):
             capture_frame()
         
+        # Initialize movement record
+        movement_record = {
+            "initial_setup": {
+                "description": f"Ball under the {get_cup_positions()[env.unwrapped.current_ball_cup_idx + 1]} cup",
+                "start_frame": 0,
+                "end_frame": 45
+            },
+            "movements": [],
+            "final_state": {
+                "description": "",
+                "frame": 0
+            }
+        }
+
         # 让杯子落下并覆盖球
         print("Stepping environment to let cups settle...")
         planner.open_gripper()
@@ -329,6 +370,8 @@ def solve(env: BaseEnv, debug=False, vis=False):
         for _ in range(15):
             capture_frame()
         
+        current_frame = len(scene_camera_frames)
+        
         # 3. 执行3次随机杯子交换动画
         print("Performing 3 shuffle animations...")
         for i in range(3):
@@ -338,14 +381,33 @@ def solve(env: BaseEnv, debug=False, vis=False):
             available_cups.remove(cup_idx1)
             cup_idx2 = random.choice(available_cups)
             
-            print(f"Shuffle {i+1}/3: Swapping cup {cup_idx1} and cup {cup_idx2}")
+            # Get cup positions before swap
+            cup_positions = get_cup_positions()
+            cup1_pos = cup_positions[cup_idx1]
+            cup2_pos = cup_positions[cup_idx2]
+            
+            print(f"Shuffle {i+1}/3: Swapping cup {cup_idx1} ({cup1_pos}) and cup {cup_idx2} ({cup2_pos})")
+            
+            # Record movement start
+            movement_start_frame = current_frame
             
             # 使用全局的shuffle_with_capture函数
             shuffle_with_capture(cup_idx1, cup_idx2, capture_frame=capture_frame)
             
+            # Update current frame count
+            current_frame = len(scene_camera_frames)
+            
+            # Record movement
+            movement_record["movements"].append({
+                "description": f"swap: {cup1_pos} cup, {cup2_pos} cup",
+                "start_frame": movement_start_frame,
+                "end_frame": current_frame
+            })
+            
             # 在交换之间暂停
             time.sleep(0.25)
             capture_frame()
+            current_frame = len(scene_camera_frames)
         
         # 4. 保存视频
         frames_array = np.array(scene_camera_frames)
@@ -359,6 +421,96 @@ def solve(env: BaseEnv, debug=False, vis=False):
         video_path = f"videos/cup_shuffle_{time.strftime('%Y%m%d_%H%M%S')}.mp4"
         vwrite(video_path, frames_array)
         print(f"Auto play complete - video saved to {video_path}")
+        
+        # 捕获最后一帧的分割图
+        print("Capturing segmentation map of the final frame...")
+        camera.capture()
+        images = camera.get_obs(rgb=True, segmentation=True)
+        segmentation = images['segmentation'].squeeze().cpu().numpy()
+        cup_name_map = {
+            0: "papercup",
+            1: "papercup2",
+            2: "papercup3"
+        }
+        ball_cup_idx = env.unwrapped.current_ball_cup_idx
+        ball_cup_name = cup_name_map[ball_cup_idx]
+        # 查找包含球的杯子的分割ID
+        segmentation_id_map = env.unwrapped.segmentation_id_map
+        for seg_id, obj in segmentation_id_map.items():
+            if hasattr(obj, 'name') and obj.name == ball_cup_name:
+                ball_cup_seg_id = seg_id
+                break
+        
+        if ball_cup_seg_id is not None:
+            # 创建只包含球的杯子的分割图
+            ball_cup_mask = (segmentation == ball_cup_seg_id)
+            ball_cup_segmentation = np.zeros_like(segmentation)
+            ball_cup_segmentation[ball_cup_mask] = ball_cup_seg_id
+            
+            # 获取杯子的边界框
+            y_coords, x_coords = np.where(ball_cup_mask)
+            if len(y_coords) > 0 and len(x_coords) > 0:
+                min_x, max_x = np.min(x_coords), np.max(x_coords)
+                min_y, max_y = np.min(y_coords), np.max(y_coords)
+                bounding_box = {
+                    "min_x": int(min_x),
+                    "min_y": int(min_y),
+                    "max_x": int(max_x),
+                    "max_y": int(max_y)
+                }
+                print(f"Ball cup bounding box: {bounding_box}")
+                
+                # 获取最后一帧的RGB图像
+                camera.capture()
+                rgb_images = camera.get_obs(rgb=True)
+                last_frame_rgb = rgb_images['rgb'].squeeze().cpu().numpy()
+                
+                # 在RGB图像上绘制边界框
+                fig, ax = plt.subplots(figsize=(10, 10))
+                ax.imshow(last_frame_rgb)
+                
+                # 创建矩形补丁表示边界框
+                rect = patches.Rectangle(
+                    (bounding_box["min_x"], bounding_box["min_y"]),
+                    bounding_box["max_x"] - bounding_box["min_x"],
+                    bounding_box["max_y"] - bounding_box["min_y"],
+                    linewidth=2, edgecolor='r', facecolor='none'
+                )
+                ax.add_patch(rect)
+                
+                # 添加标签
+                cup_position = get_cup_positions()[env.unwrapped.current_ball_cup_idx + 1]
+                ax.text(
+                    bounding_box["min_x"], 
+                    bounding_box["min_y"] - 10, 
+                    f"Ball under {cup_position} cup", 
+                    color='red', 
+                    fontsize=12, 
+                    bbox=dict(facecolor='white', alpha=0.7)
+                )
+                
+                # 保存带有边界框的图像
+                bbox_image_path = video_path.replace('.mp4', '_with_bbox.png')
+                plt.savefig(bbox_image_path)
+                plt.close()
+                print(f"Image with bounding box saved to {bbox_image_path}")
+            else:
+                bounding_box = None
+                print("Could not find bounding box for the ball cup")
+
+        
+        # Add final state to movement record
+        movement_record["final_state"] = {
+            "description": f"Ball is under the {get_cup_positions()[env.unwrapped.current_ball_cup_idx + 1]} cup",
+            "frame": current_frame
+        }
+        movement_record["ball_cup_bounding_box"] = bounding_box
+        # Save movement record
+        json_path = video_path.replace('.mp4', '_movements.json')
+        with open(json_path, 'w') as f:
+            json.dump(movement_record, f, indent=2)
+        print(f"Movement record saved to {json_path}")
+        print(f"Final state: {movement_record['final_state']['description']}")
     
     def shuffle_with_capture(cup_idx1=None, cup_idx2=None, capture_frame=None):
         """
@@ -384,6 +536,13 @@ def solve(env: BaseEnv, debug=False, vis=False):
         papercup2 = env.unwrapped.papercup2
         papercup3 = env.unwrapped.papercup3
         ball = env.unwrapped.ball  # 获取球对象
+        # Set ball to kinematic(no force applied)
+        ball._bodies[0].kinematic = True
+
+        # 动画前设置杯子不受重力影响
+        papercup1._bodies[0].disable_gravity = True
+        papercup2._bodies[0].disable_gravity = True
+        papercup3._bodies[0].disable_gravity = True
 
         papercup1_original_pose = sapien.Pose(
             p=papercup1.pose.p.cpu().numpy().astype(np.float32).squeeze(),
@@ -511,6 +670,12 @@ def solve(env: BaseEnv, debug=False, vis=False):
             time.sleep(0.01)  # 平滑动画的短暂延迟
         
         print("Shuffle animation completed")
+
+        # 动画后恢复杯子
+        papercup1._bodies[0].disable_gravity = False
+        papercup2._bodies[0].disable_gravity = False
+        papercup3._bodies[0].disable_gravity = False
+
         return ball_in_cup_idx  # 返回球所在杯子的索引
     
     select_panda_hand()
@@ -565,7 +730,7 @@ def solve(env: BaseEnv, debug=False, vis=False):
         elif viewer.window.key_press("z"):
             auto_play()
         elif viewer.window.key_press("f"):
-            shuffle_with_capture()  # 现在可以直接调用，不需要传参数，会随机选择杯子
+            shuffle_with_capture()
         elif viewer.window.key_press("b"):
             pick_cup_with_ball()
         elif viewer.window.key_press("g") and robot_has_gripper:
@@ -617,3 +782,4 @@ def solve(env: BaseEnv, debug=False, vis=False):
     return args
 if __name__ == "__main__":
     main(parse_args())
+  

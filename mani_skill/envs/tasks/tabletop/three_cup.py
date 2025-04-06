@@ -72,11 +72,9 @@ class ThreeCupEnv(BaseEnv):
         # 创建杯子的物理材质
         cup_physical_material = physx.PhysxMaterial(
             static_friction=0.5,    # 静摩擦系数
-            dynamic_friction=0.4,   # 动摩擦系数
+            dynamic_friction=0.4,  
             restitution=0.1         # 弹性恢复系数（碰撞后回弹程度）
         )
-        # 设置杯子的密度（kg/m³）- 纸杯的密度一般较轻
-        # cup_density = 200  # 标准物体密度约为1000，较轻物体可设置为200-500
 
         papercup_builder.add_nonconvex_collision_from_file(
             filename=papercup_file,
@@ -89,6 +87,13 @@ class ThreeCupEnv(BaseEnv):
         )
         # 添加视觉模型
         papercup_builder.add_visual_from_file(papercup_file)
+        
+        cup_mass = 0.1
+        papercup_builder.set_mass_and_inertia(
+            mass=cup_mass,
+            cmass_local_pose=sapien.Pose(),
+            inertia=np.array([0.001, 0.001, 0.001])
+        )
         # 创建三个杯子物体
         self.papercup = papercup_builder.build(name="papercup")
         self.papercup2 = papercup_builder.build(name="papercup2")
