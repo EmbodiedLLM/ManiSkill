@@ -7,6 +7,7 @@ import sapien.core as sapien
 from mani_skill.envs.sapien_env import BaseEnv
 import time
 import random
+import traceback  # 添加traceback模块导入
 
 from mani_skill.examples.motionplanning.panda.motionplanner import \
     PandaArmMotionPlanningSolver
@@ -162,10 +163,37 @@ def solve(env: BaseEnv, debug=False, vis=False):
     def select_panda_hand():
         viewer.select_entity(sapien_utils.get_obj_by_name(env.agent.robot.links, "panda_hand")._objs[0].entity)
     
-    def pick_cup_with_ball():
+    def pick_cup_with_ball(capture_frame=None, record_trajectory=False):
         print("Finding and picking up the cup containing the ball...")
-
+        action_frames = []  # Store frames if we're capturing
         
+        # 初始化轨迹记录数据结构
+        if record_trajectory:
+            trajectory_data = {
+                "joint_positions": [],  # 存储机械臂关节位置
+                "eef_positions": [],    # 存储末端执行器位置
+                "eef_orientations": [], # 存储末端执行器方向
+                "timestamps": [],       # 时间戳
+                "descriptions": []      # 每个轨迹点的描述
+            }
+        
+        # 定义记录轨迹的函数
+        def record_trajectory_point(description=""):
+            if record_trajectory:
+                # 获取关节位置
+                qpos = planner.robot.get_qpos().cpu().numpy()
+                # 获取末端执行器位置和方向
+                eef_pose = env.unwrapped.agent.tcp.pose
+                eef_pos = eef_pose.p.cpu().numpy()
+                eef_ori = eef_pose.q.cpu().numpy()
+                
+                # 记录数据
+                trajectory_data["joint_positions"].append(qpos.tolist())
+                trajectory_data["eef_positions"].append(eef_pos.tolist())
+                trajectory_data["eef_orientations"].append(eef_ori.tolist())
+                trajectory_data["timestamps"].append(time.time())
+                trajectory_data["descriptions"].append(description)
+
         # 获取三个杯子和球的引用
         papercup1 = env.unwrapped.papercup
         papercup2 = env.unwrapped.papercup2
@@ -197,6 +225,12 @@ def solve(env: BaseEnv, debug=False, vis=False):
             3: papercup3
         }
         target_cup = cups[ball_in_cup_idx]
+        
+        # Capture frame if requested
+        if capture_frame is not None:
+            capture_frame()
+        # 记录初始轨迹点
+        record_trajectory_point("initial_pose")
         
         # 为抓取准备参数
         FINGER_LENGTH = 0.025
@@ -232,57 +266,99 @@ def solve(env: BaseEnv, debug=False, vis=False):
             break
         else:
             print("Fail to find a valid grasp pose")
-            return
+            return None, None if record_trajectory else None
         
         # 首先移动到杯子上方以避免碰撞
         print("Moving above the cup...")
         pre_grasp_pose = grasp_pose * sapien.Pose([0, 0, -0.1])
         result = planner.move_to_pose_with_screw(pre_grasp_pose, dry_run=True)
         if result != -1:
+            # 记录运动过程中的轨迹
+            record_trajectory_point("before_moving_above_cup")
+            
             _, reward, _, _, info = planner.follow_path(result)
             print(f"Reward: {reward}, Info: {info}")
+            
+            # Capture frames during movement if requested
+            if capture_frame is not None:
+                capture_frame()
+            record_trajectory_point("above_cup_position")
         else:
             print("Failed to plan path to position above cup")
-            return
+            return None, None if record_trajectory else None
         
         # 接近杯子
         print("Approaching the cup...")
         reach_pose = grasp_pose * sapien.Pose([0, 0, -0.05])
         result = planner.move_to_pose_with_screw(reach_pose, dry_run=True)
         if result != -1:
+            # 记录运动过程中的轨迹
+            record_trajectory_point("before_approaching_cup")
+            
             _, reward, _, _, info = planner.follow_path(result)
             print(f"Reward: {reward}, Info: {info}")
+            if capture_frame is not None:
+                capture_frame()
+            record_trajectory_point("approach_position")
         else:
             print("Failed to plan path to approach cup")
-            return
+            return None, None if record_trajectory else None
         
         # 移动到抓取位置
         print("Moving to grasp position...")
         result = planner.move_to_pose_with_screw(grasp_pose, dry_run=True)
         if result != -1:
+            # 记录运动过程中的轨迹
+            record_trajectory_point("before_moving_to_grasp")
+            
             _, reward, _, _, info = planner.follow_path(result)
             print(f"Reward: {reward}, Info: {info}")
+            if capture_frame is not None:
+                capture_frame()
+            record_trajectory_point("grasp_position")
         else:
             print("Failed to plan path to grasp position")
-            return
+            return None, None if record_trajectory else None
         
         # 抓取
         print("Closing gripper...")
+        record_trajectory_point("before_closing_gripper")
         _, reward, _, _, info = planner.close_gripper()
         print(f"Reward: {reward}, Info: {info}")
+        record_trajectory_point("after_closing_gripper")
+        
+        # Capture multiple frames during gripper closing for smoother video
+        if capture_frame is not None:
+            for i in range(15):  # Capture several frames during gripper closing
+                capture_frame()
+                record_trajectory_point("closing_gripper")
         
         # 提起
         print("Lifting cup...")
         lift_pose = sapien.Pose([0, 0, 0.2]) * grasp_pose
         result = planner.move_to_pose_with_screw(lift_pose, dry_run=True)
         if result != -1:
+            # 记录运动过程中的轨迹
+            record_trajectory_point("before_lifting_cup")
+            
             _, reward, _, _, info = planner.follow_path(result)
             print(f"Reward: {reward}, Info: {info}")
+            if capture_frame is not None:
+                capture_frame()
+            record_trajectory_point("final_lifted_position")
         else:
             print("Failed to plan lifting path")
         
+        # Hold the pose for a moment at the end for video
+        if capture_frame is not None:
+            for i in range(30):  # About 1 second at 30fps
+                capture_frame()
+                record_trajectory_point("holding_final_pose")
+        
         print("Pick up operation complete")
-
+        
+        # Return the index of the cup containing the ball and trajectory data if recording
+        return (ball_in_cup_idx, trajectory_data) if record_trajectory else ball_in_cup_idx
 
     def get_cup_positions():
         """Determine which cup is left, middle, and right based on x coordinates"""
@@ -314,10 +390,6 @@ def solve(env: BaseEnv, debug=False, vis=False):
         scene_camera_frames = []  # 清空之前可能存在的帧
         timestamp = time.strftime('%Y%m%d_%H%M%S')
         
-        # 初始化记录关节轨迹和末端执行器数据的列表
-        joint_trajectories = []
-        eef_trajectories = []
-        
         env.reset()
         print("Starting auto play sequence...")
         
@@ -335,23 +407,12 @@ def solve(env: BaseEnv, debug=False, vis=False):
         # 创建保存视频的目录
         os.makedirs("videos", exist_ok=True)
         
-        # 捕获初始帧和机器人状态
-        def capture_frame_and_state():
-            # 捕获图像
+        # 捕获初始帧
+        def capture_frame():
             camera.capture()  # 拍照
             images = camera.get_obs(rgb=True)  # 只获取RGB数据
             frame = images['rgb'].squeeze().cpu().numpy()
             scene_camera_frames.append(frame)
-            
-            # 记录关节轨迹
-            joint_pos = planner.robot.get_qpos().tolist()
-            joint_trajectories.append(joint_pos)
-            
-            # 记录末端执行器位置和姿态
-            eef_pose = env.unwrapped.agent.tcp.pose
-            eef_pos = eef_pose.p.cpu().numpy().astype(np.float32).squeeze().tolist()
-            eef_quat = eef_pose.q.cpu().numpy().astype(np.float32).squeeze().tolist()
-            eef_trajectories.append({"position": eef_pos, "orientation": eef_quat})
         
         # 1. 等待1秒显示初始状态
         print("Waiting for 1 second to show initial state...")
@@ -360,7 +421,7 @@ def solve(env: BaseEnv, debug=False, vis=False):
         # 不使用sleep，而是连续捕获多帧来创建视频中的1秒过渡
         # 假设最终视频帧率为30fps，捕获30帧表示1秒
         for _ in range(30):
-            capture_frame_and_state()
+            capture_frame()
         
         # Initialize movement record
         movement_record = {
@@ -379,12 +440,12 @@ def solve(env: BaseEnv, debug=False, vis=False):
         # 让杯子落下并覆盖球
         print("Stepping environment to let cups settle...")
         planner.open_gripper()
-        capture_frame_and_state()
+        capture_frame()
         
         # 额外0.5秒，同样用多帧捕获替代sleep
         # 15帧表示0.5秒
         for _ in range(15):
-            capture_frame_and_state()
+            capture_frame()
         
         current_frame = len(scene_camera_frames)
         
@@ -408,7 +469,7 @@ def solve(env: BaseEnv, debug=False, vis=False):
             movement_start_frame = current_frame
             
             # 使用全局的shuffle_with_capture函数
-            shuffle_with_capture(cup_idx1, cup_idx2, capture_frame=capture_frame_and_state)
+            shuffle_with_capture(cup_idx1, cup_idx2, capture_frame=capture_frame)
             
             # Update current frame count
             current_frame = len(scene_camera_frames)
@@ -422,7 +483,7 @@ def solve(env: BaseEnv, debug=False, vis=False):
             
             # 在交换之间暂停
             time.sleep(0.25)
-            capture_frame_and_state()
+            capture_frame()
             current_frame = len(scene_camera_frames)
         
         # 4. 保存视频
@@ -434,29 +495,8 @@ def solve(env: BaseEnv, debug=False, vis=False):
             frames_array = (frames_array * 255).astype(np.uint8)
         
         # 保存视频
-        video_path = f"videos/cup_shuffle_{timestamp}.mp4"
+        video_path = f"videos/task_{timestamp}.mp4"
         vwrite(video_path, frames_array)
-        
-        # 保存动作视频和轨迹数据
-        action_video_path = f"videos/action_{timestamp}.mp4"
-        vwrite(action_video_path, frames_array)
-        print(f"Action video saved to {action_video_path}")
-        
-        # 保存关节轨迹和末端执行器数据
-        action_data = {
-            "joint_trajectories": joint_trajectories,
-            "eef_trajectories": eef_trajectories,
-            "num_frames": len(scene_camera_frames),
-            "timestamp": timestamp,
-            "movements": movement_record["movements"],
-            "initial_setup": movement_record["initial_setup"]
-        }
-        
-        action_data_path = f"videos/action_{timestamp}.json"
-        with open(action_data_path, 'w') as f:
-            json.dump(action_data, f, indent=2)
-        print(f"Action trajectory data saved to {action_data_path}")
-        
         print(f"Auto play complete - video saved to {video_path}")
         
         # 捕获最后一帧的分割图
@@ -549,7 +589,88 @@ def solve(env: BaseEnv, debug=False, vis=False):
             json.dump(movement_record, f, indent=2)
         print(f"Movement record saved to {json_path}")
         print(f"Final state: {movement_record['final_state']['description']}")
-    
+        
+        # 5. 添加抓取操作并记录视频
+        print("\n--- Beginning pick up operation ---")
+        
+        # 创建新的帧列表用于抓取动作视频
+        action_frames = []
+        
+        def capture_action_frame():
+            camera.capture()
+            images = camera.get_obs(rgb=True)
+            frame = images['rgb'].squeeze().cpu().numpy()
+            action_frames.append(frame)
+        
+        # 暂停1秒显示初始状态
+        for _ in range(30):
+            capture_action_frame()
+        
+        # 执行抓取操作并捕获帧和轨迹
+        ball_cup_idx, trajectory_data = pick_cup_with_ball(capture_frame=capture_action_frame, record_trajectory=True)
+        
+        # 保存抓取动作视频
+        if action_frames:
+            action_frames_array = np.array(action_frames)
+            if action_frames_array.max() <= 1.0:
+                action_frames_array = (action_frames_array * 255).astype(np.uint8)
+            
+            action_video_path = f"videos/action_{timestamp}.mp4"
+            vwrite(action_video_path, action_frames_array)
+            print(f"Pick up action video saved to {action_video_path}")
+            
+            # 创建描述文件
+            action_json_path = action_video_path.replace('.mp4', '_info.json')
+            action_info = {
+                "description": f"Picking up the {get_cup_positions()[ball_cup_idx]} cup containing the ball",
+                "timestamp": timestamp,
+                "frames": len(action_frames)
+            }
+            with open(action_json_path, 'w') as f:
+                json.dump(action_info, f, indent=2)
+            print(f"Action info saved to {action_json_path}")
+            
+            # 保存轨迹数据
+            if trajectory_data:
+                # 使用numpy保存轨迹数据
+                trajectory_file = action_video_path.replace('.mp4', '_trajectory.npz')
+                np.savez_compressed(
+                    trajectory_file,
+                    joint_positions=np.array(trajectory_data["joint_positions"]),
+                    eef_positions=np.array(trajectory_data["eef_positions"]),
+                    eef_orientations=np.array(trajectory_data["eef_orientations"]),
+                    timestamps=np.array(trajectory_data["timestamps"]),
+                    descriptions=np.array(trajectory_data["descriptions"])
+                )
+                print(f"Trajectory data saved to {trajectory_file}")
+                
+                # 保存为JSONL格式 (JSON Lines)，每行一个JSON对象
+                jsonl_trajectory_file = action_video_path.replace('.mp4', '_trajectory.jsonl')
+                with open(jsonl_trajectory_file, 'w') as f:
+                    # 将每个时间点的数据转换为单独的JSON行
+                    for i in range(len(trajectory_data["timestamps"])):
+                        # 确保数据可以被JSON序列化
+                        def convert_numpy(obj):
+                            if isinstance(obj, np.ndarray):
+                                return obj.tolist()
+                            elif isinstance(obj, np.number):
+                                return obj.item()  # 将numpy标量转换为Python标量
+                            elif isinstance(obj, list):
+                                return [convert_numpy(item) for item in obj]
+                            else:
+                                return obj
+                        
+                        # 准备数据
+                        frame_data = {
+                            "timestamp": convert_numpy(trajectory_data["timestamps"][i]),
+                            "joint_positions": convert_numpy(trajectory_data["joint_positions"][i]),
+                            "eef_positions": convert_numpy(trajectory_data["eef_positions"][i]),
+                            "eef_orientations": convert_numpy(trajectory_data["eef_orientations"][i]),
+                            "description": trajectory_data["descriptions"][i]
+                        }
+                        f.write(json.dumps(frame_data) + '\n')
+                print(f"Trajectory data (JSONL format) saved to {jsonl_trajectory_file}")
+
     def shuffle_with_capture(cup_idx1=None, cup_idx2=None, capture_frame=None):
         """
         执行杯子交换动画
@@ -577,7 +698,7 @@ def solve(env: BaseEnv, debug=False, vis=False):
         # Set ball to kinematic(no force applied)
         ball._bodies[0].kinematic = True
 
-        # 动画前设置杯子不受重力影响
+        # # 动画前设置杯子不受重力影响
         papercup1._bodies[0].disable_gravity = True
         papercup2._bodies[0].disable_gravity = True
         papercup3._bodies[0].disable_gravity = True
@@ -770,7 +891,13 @@ def solve(env: BaseEnv, debug=False, vis=False):
         elif viewer.window.key_press("f"):
             shuffle_with_capture()
         elif viewer.window.key_press("b"):
-            pick_cup_with_ball()
+            result = pick_cup_with_ball()
+            if isinstance(result, tuple):
+                ball_cup_idx, _ = result
+            else:
+                ball_cup_idx = result
+            if ball_cup_idx is not None:
+                print(f"Successfully picked up cup {ball_cup_idx}")
         elif viewer.window.key_press("g") and robot_has_gripper:
             if gripper_open:
                 gripper_open = False
