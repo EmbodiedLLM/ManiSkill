@@ -312,6 +312,11 @@ def solve(env: BaseEnv, debug=False, vis=False):
     def auto_play():
         global scene_camera_frames  # 使用全局变量存储帧
         scene_camera_frames = []  # 清空之前可能存在的帧
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        
+        # 初始化记录关节轨迹和末端执行器数据的列表
+        joint_trajectories = []
+        eef_trajectories = []
         
         env.reset()
         print("Starting auto play sequence...")
@@ -330,12 +335,23 @@ def solve(env: BaseEnv, debug=False, vis=False):
         # 创建保存视频的目录
         os.makedirs("videos", exist_ok=True)
         
-        # 捕获初始帧
-        def capture_frame():
+        # 捕获初始帧和机器人状态
+        def capture_frame_and_state():
+            # 捕获图像
             camera.capture()  # 拍照
             images = camera.get_obs(rgb=True)  # 只获取RGB数据
             frame = images['rgb'].squeeze().cpu().numpy()
             scene_camera_frames.append(frame)
+            
+            # 记录关节轨迹
+            joint_pos = planner.robot.get_qpos().tolist()
+            joint_trajectories.append(joint_pos)
+            
+            # 记录末端执行器位置和姿态
+            eef_pose = env.unwrapped.agent.tcp.pose
+            eef_pos = eef_pose.p.cpu().numpy().astype(np.float32).squeeze().tolist()
+            eef_quat = eef_pose.q.cpu().numpy().astype(np.float32).squeeze().tolist()
+            eef_trajectories.append({"position": eef_pos, "orientation": eef_quat})
         
         # 1. 等待1秒显示初始状态
         print("Waiting for 1 second to show initial state...")
@@ -344,7 +360,7 @@ def solve(env: BaseEnv, debug=False, vis=False):
         # 不使用sleep，而是连续捕获多帧来创建视频中的1秒过渡
         # 假设最终视频帧率为30fps，捕获30帧表示1秒
         for _ in range(30):
-            capture_frame()
+            capture_frame_and_state()
         
         # Initialize movement record
         movement_record = {
@@ -363,12 +379,12 @@ def solve(env: BaseEnv, debug=False, vis=False):
         # 让杯子落下并覆盖球
         print("Stepping environment to let cups settle...")
         planner.open_gripper()
-        capture_frame()
+        capture_frame_and_state()
         
         # 额外0.5秒，同样用多帧捕获替代sleep
         # 15帧表示0.5秒
         for _ in range(15):
-            capture_frame()
+            capture_frame_and_state()
         
         current_frame = len(scene_camera_frames)
         
@@ -392,7 +408,7 @@ def solve(env: BaseEnv, debug=False, vis=False):
             movement_start_frame = current_frame
             
             # 使用全局的shuffle_with_capture函数
-            shuffle_with_capture(cup_idx1, cup_idx2, capture_frame=capture_frame)
+            shuffle_with_capture(cup_idx1, cup_idx2, capture_frame=capture_frame_and_state)
             
             # Update current frame count
             current_frame = len(scene_camera_frames)
@@ -406,7 +422,7 @@ def solve(env: BaseEnv, debug=False, vis=False):
             
             # 在交换之间暂停
             time.sleep(0.25)
-            capture_frame()
+            capture_frame_and_state()
             current_frame = len(scene_camera_frames)
         
         # 4. 保存视频
@@ -418,8 +434,29 @@ def solve(env: BaseEnv, debug=False, vis=False):
             frames_array = (frames_array * 255).astype(np.uint8)
         
         # 保存视频
-        video_path = f"videos/cup_shuffle_{time.strftime('%Y%m%d_%H%M%S')}.mp4"
+        video_path = f"videos/cup_shuffle_{timestamp}.mp4"
         vwrite(video_path, frames_array)
+        
+        # 保存动作视频和轨迹数据
+        action_video_path = f"videos/action_{timestamp}.mp4"
+        vwrite(action_video_path, frames_array)
+        print(f"Action video saved to {action_video_path}")
+        
+        # 保存关节轨迹和末端执行器数据
+        action_data = {
+            "joint_trajectories": joint_trajectories,
+            "eef_trajectories": eef_trajectories,
+            "num_frames": len(scene_camera_frames),
+            "timestamp": timestamp,
+            "movements": movement_record["movements"],
+            "initial_setup": movement_record["initial_setup"]
+        }
+        
+        action_data_path = f"videos/action_{timestamp}.json"
+        with open(action_data_path, 'w') as f:
+            json.dump(action_data, f, indent=2)
+        print(f"Action trajectory data saved to {action_data_path}")
+        
         print(f"Auto play complete - video saved to {video_path}")
         
         # 捕获最后一帧的分割图
@@ -436,6 +473,7 @@ def solve(env: BaseEnv, debug=False, vis=False):
         ball_cup_name = cup_name_map[ball_cup_idx]
         # 查找包含球的杯子的分割ID
         segmentation_id_map = env.unwrapped.segmentation_id_map
+        ball_cup_seg_id = None
         for seg_id, obj in segmentation_id_map.items():
             if hasattr(obj, 'name') and obj.name == ball_cup_name:
                 ball_cup_seg_id = seg_id
