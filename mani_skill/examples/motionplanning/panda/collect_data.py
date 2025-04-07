@@ -41,16 +41,16 @@ class DataCollector:
         self.camera = self.human_render_cameras[self.camera_name]
         print(f"Using camera: {self.camera_name}")
         new_traj_name = time.strftime("%Y%m%d_%H%M%S")
-        self.env = RecordEpisode(
-            self.env,
-            output_dir=osp.join("demos", self.env_id, "motionplanning"),
-            trajectory_name=new_traj_name, save_video=False,
-            source_type="motionplanning",
-            source_desc="official motion planning solution from ManiSkill contributors",
-            video_fps=self.fps,
-            record_reward=False,
-            save_on_reset=False
-        )
+        # self.env = RecordEpisode(
+        #     self.env,
+        #     output_dir=osp.join("demos", self.env_id, "motionplanning"),
+        #     trajectory_name=new_traj_name, save_video=False,
+        #     source_type="motionplanning",
+        #     source_desc="official motion planning solution from ManiSkill contributors",
+        #     video_fps=self.fps,
+        #     record_reward=False,
+        #     save_on_reset=False
+        # )
         self.env.reset()
         self.scene_camera_frames = []
         self.papercup1 = self.env.unwrapped.papercup
@@ -167,7 +167,8 @@ class DataCollector:
             "initial_setup": {
                 "description": f"Ball under the {self.get_cup_positions()[self.env.unwrapped.current_ball_cup_idx + 1]} cup",
                 "start_frame": 0,
-                "end_frame": current_frame
+                "end_frame": current_frame,
+                "shuffle_count": shuffle_count
             },
             "movements": [],
             "final_state": {
@@ -852,11 +853,20 @@ if __name__ == "__main__":
     # Add argument parser
     parser = argparse.ArgumentParser(description='Collect data for ThreeCup task')
     parser.add_argument('--data_iters', type=int, default=2, help='Number of data iterations to collect')
-    parser.add_argument('--shuffle_count', type=int, default=7, help='Number of shuffle animations per iteration')
+    parser.add_argument('--shuffle_count', type=int, default=7, help='Number of shuffle animations per iteration (ignored if random_shuffle is True)')
+    parser.add_argument('--random_shuffle', action='store_true', help='Use random shuffle count between 3 and 10')
     args = parser.parse_args()
     
     # Use arguments from command line
     data_collection = DataCollector(render_mode="human_render")
     for i in range(args.data_iters):
         print(f"\n--- Starting data collection iteration {i+1}/{args.data_iters} ---\n")
-        data_collection.collect_single_task(shuffle_count=args.shuffle_count)
+        
+        # Determine shuffle count - either fixed or random
+        if args.random_shuffle:
+            actual_shuffle_count = random.randint(3, 10)
+            print(f"Using random shuffle count: {actual_shuffle_count}")
+        else:
+            actual_shuffle_count = args.shuffle_count
+            
+        data_collection.collect_single_task(shuffle_count=actual_shuffle_count)
