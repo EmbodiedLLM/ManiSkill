@@ -351,7 +351,7 @@ def solve(env: BaseEnv, debug=False, vis=False):
         
         # Hold the pose for a moment at the end for video
         if capture_frame is not None:
-            for i in range(30):  # About 1 second at 30fps
+            for i in range(self.fps):  # 
                 capture_frame()
                 record_trajectory_point("holding_final_pose")
         
@@ -406,6 +406,7 @@ def solve(env: BaseEnv, debug=False, vis=False):
         
         # 创建保存视频的目录
         os.makedirs("videos", exist_ok=True)
+        os.makedirs(f"videos/{timestamp}", exist_ok=True)
         
         # 捕获初始帧
         def capture_frame():
@@ -495,7 +496,7 @@ def solve(env: BaseEnv, debug=False, vis=False):
             frames_array = (frames_array * 255).astype(np.uint8)
         
         # 保存视频
-        video_path = f"videos/task_{timestamp}.mp4"
+        video_path = f"videos/{timestamp}/{timestamp}_task.mp4"
         vwrite(video_path, frames_array)
         print(f"Auto play complete - video saved to {video_path}")
         
@@ -530,13 +531,28 @@ def solve(env: BaseEnv, debug=False, vis=False):
             if len(y_coords) > 0 and len(x_coords) > 0:
                 min_x, max_x = np.min(x_coords), np.max(x_coords)
                 min_y, max_y = np.min(y_coords), np.max(y_coords)
-                bounding_box = {
+                
+                # 获取图像尺寸
+                img_height, img_width = segmentation.shape
+                
+                # 转换为相对坐标（0-1范围）
+                relative_bounding_box = {
+                    "min_x": float(min_x) / img_width,
+                    "min_y": float(min_y) / img_height,
+                    "max_x": float(max_x) / img_width,
+                    "max_y": float(max_y) / img_height
+                }
+                
+                # 保留绝对坐标用于绘制
+                absolute_bounding_box = {
                     "min_x": int(min_x),
                     "min_y": int(min_y),
                     "max_x": int(max_x),
                     "max_y": int(max_y)
                 }
-                print(f"Ball cup bounding box: {bounding_box}")
+                
+                print(f"Ball cup relative bounding box: {relative_bounding_box}")
+                print(f"Ball cup absolute bounding box: {absolute_bounding_box}")
                 
                 # 获取最后一帧的RGB图像
                 camera.capture()
@@ -547,11 +563,11 @@ def solve(env: BaseEnv, debug=False, vis=False):
                 fig, ax = plt.subplots(figsize=(10, 10))
                 ax.imshow(last_frame_rgb)
                 
-                # 创建矩形补丁表示边界框
+                # 创建矩形补丁表示边界框（使用绝对坐标）
                 rect = patches.Rectangle(
-                    (bounding_box["min_x"], bounding_box["min_y"]),
-                    bounding_box["max_x"] - bounding_box["min_x"],
-                    bounding_box["max_y"] - bounding_box["min_y"],
+                    (absolute_bounding_box["min_x"], absolute_bounding_box["min_y"]),
+                    absolute_bounding_box["max_x"] - absolute_bounding_box["min_x"],
+                    absolute_bounding_box["max_y"] - absolute_bounding_box["min_y"],
                     linewidth=2, edgecolor='r', facecolor='none'
                 )
                 ax.add_patch(rect)
@@ -559,8 +575,8 @@ def solve(env: BaseEnv, debug=False, vis=False):
                 # 添加标签
                 cup_position = get_cup_positions()[env.unwrapped.current_ball_cup_idx + 1]
                 ax.text(
-                    bounding_box["min_x"], 
-                    bounding_box["min_y"] - 10, 
+                    absolute_bounding_box["min_x"], 
+                    absolute_bounding_box["min_y"] - 10, 
                     f"Ball under {cup_position} cup", 
                     color='red', 
                     fontsize=12, 
@@ -572,6 +588,9 @@ def solve(env: BaseEnv, debug=False, vis=False):
                 plt.savefig(bbox_image_path)
                 plt.close()
                 print(f"Image with bounding box saved to {bbox_image_path}")
+                
+                # 使用相对坐标作为边界框
+                bounding_box = relative_bounding_box
             else:
                 bounding_box = None
                 print("Could not find bounding box for the ball cup")
@@ -582,7 +601,8 @@ def solve(env: BaseEnv, debug=False, vis=False):
             "description": f"Ball is under the {get_cup_positions()[env.unwrapped.current_ball_cup_idx + 1]} cup",
             "frame": current_frame
         }
-        movement_record["ball_cup_bounding_box"] = bounding_box
+        movement_record["ball_cup_relative_bounding_box"] = bounding_box
+        
         # Save movement record
         json_path = video_path.replace('.mp4', '_movements.json')
         with open(json_path, 'w') as f:
@@ -615,12 +635,12 @@ def solve(env: BaseEnv, debug=False, vis=False):
             if action_frames_array.max() <= 1.0:
                 action_frames_array = (action_frames_array * 255).astype(np.uint8)
             
-            action_video_path = f"videos/action_{timestamp}.mp4"
+            action_video_path = f"videos/{timestamp}/{timestamp}_action.mp4"
             vwrite(action_video_path, action_frames_array)
             print(f"Pick up action video saved to {action_video_path}")
             
             # 创建描述文件
-            action_json_path = action_video_path.replace('.mp4', '_info.json')
+            action_json_path = action_video_path.replace('.mp4', '_metadata.json')
             action_info = {
                 "description": f"Picking up the {get_cup_positions()[ball_cup_idx]} cup containing the ball",
                 "timestamp": timestamp,
@@ -632,18 +652,6 @@ def solve(env: BaseEnv, debug=False, vis=False):
             
             # 保存轨迹数据
             if trajectory_data:
-                # 使用numpy保存轨迹数据
-                trajectory_file = action_video_path.replace('.mp4', '_trajectory.npz')
-                np.savez_compressed(
-                    trajectory_file,
-                    joint_positions=np.array(trajectory_data["joint_positions"]),
-                    eef_positions=np.array(trajectory_data["eef_positions"]),
-                    eef_orientations=np.array(trajectory_data["eef_orientations"]),
-                    timestamps=np.array(trajectory_data["timestamps"]),
-                    descriptions=np.array(trajectory_data["descriptions"])
-                )
-                print(f"Trajectory data saved to {trajectory_file}")
-                
                 # 保存为JSONL格式 (JSON Lines)，每行一个JSON对象
                 jsonl_trajectory_file = action_video_path.replace('.mp4', '_trajectory.jsonl')
                 with open(jsonl_trajectory_file, 'w') as f:
@@ -662,7 +670,7 @@ def solve(env: BaseEnv, debug=False, vis=False):
                         
                         # 准备数据
                         frame_data = {
-                            "timestamp": convert_numpy(trajectory_data["timestamps"][i]),
+                            "frame_idx": i,  # 使用帧索引代替时间戳
                             "joint_positions": convert_numpy(trajectory_data["joint_positions"][i]),
                             "eef_positions": convert_numpy(trajectory_data["eef_positions"][i]),
                             "eef_orientations": convert_numpy(trajectory_data["eef_orientations"][i]),

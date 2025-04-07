@@ -109,7 +109,7 @@ class ThreeCupEnv(BaseEnv):
         )
         
         # 设置小球密度 - 小球应该有一定质量以保持稳定
-        ball_density = 1000  # 标准物体密度
+        ball_density = 100  # 标准物体密度
         
         ball_builder.add_sphere_visual(radius=0.02, material=sapien.render.RenderMaterial(base_color=[1, 0, 0, 1]))  
         ball_builder.add_sphere_collision(
